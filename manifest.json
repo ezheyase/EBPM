@@ -1,19 +1,14 @@
 {
-  "name": "BPM Reader",
-  "short_name": "BPM App",
+  "name": "Ultimate BPM",
+  "short_name": "UltBPM",
   "start_url": "index.html",
   "display": "standalone",
   "background_color": "#121212",
-  "theme_color": "#ff5252",
+  "theme_color": "#ff4b4b",
   "icons": [
     {
       "src": "heart.png",
       "sizes": "192x192",
-      "type": "image/png"
-    },
-    {
-      "src": "heart.png",
-      "sizes": "512x512",
       "type": "image/png"
     }
   ]

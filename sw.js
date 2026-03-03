@@ -1,6 +1,6 @@
 self.addEventListener('install', (e) => {
     e.waitUntil(
-        caches.open('bpm-store').then((cache) => cache.addAll([
+        caches.open('ult-bpm-store').then((cache) => cache.addAll([
             '/index.html',
             '/app.js',
             '/manifest.json'
