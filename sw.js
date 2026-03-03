@@ -1,4 +1,4 @@
-const CACHE_NAME = 'bpm-heart-v1';
+const CACHE_NAME = 'bpm-heart-v2';
 const ASSETS_TO_CACHE = [
     './index.html',
     './style.css',

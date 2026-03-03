@@ -4,8 +4,8 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0a0a0f" />
-    <meta name="description" content="Measure your heart rate with your camera or microphone — no wearables needed." />
+    <meta name="theme-color" content="#070710" />
+    <meta name="description" content="Measure your heart rate using your camera, microphone, or a recorded video." />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -19,131 +19,251 @@
 
 <body>
 
-    <!-- Toast -->
     <div class="toast" id="toast" role="alert" aria-live="polite"></div>
 
     <div class="app-wrapper">
 
         <!-- Header -->
         <header class="app-header">
-            <span class="logo-icon" aria-hidden="true">❤️</span>
+            <div class="logo-wrap" aria-hidden="true">❤️</div>
             <div class="header-text">
                 <h1>BPM Heart</h1>
                 <p>Real-time heart rate monitor</p>
             </div>
+            <!-- Decorative ECG SVG -->
+            <svg class="ecg-line" viewBox="0 0 120 40" fill="none" aria-hidden="true">
+                <polyline points="0,20 18,20 24,5 30,35 36,5 42,35 48,20 66,20 72,14 78,26 84,20 120,20"
+                    stroke="#FF2D55" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
         </header>
 
         <!-- PWA Install Banner -->
-        <div class="install-banner" id="installBanner" role="button" tabindex="0" aria-label="Install app">
-            <span class="install-icon" aria-hidden="true">📲</span>
-            <div class="install-text">
+        <div class="install-banner" id="installBanner" role="button" tabindex="0">
+            <span class="ii" aria-hidden="true">📲</span>
+            <div>
                 <strong>Install App</strong>
-                <span>Add to your home screen for offline use</span>
+                <span>Add to home screen for offline use</span>
             </div>
-            <span class="install-arrow" aria-hidden="true">›</span>
+            <span class="ia" aria-hidden="true">›</span>
         </div>
 
-        <!-- Mode Tabs -->
+        <!-- Tabs -->
         <nav class="tabs" role="tablist" aria-label="Measurement mode">
             <button class="tab-btn active" id="cameraTab" data-mode="camera" role="tab" aria-selected="true"
                 aria-controls="cameraPanel">
-                <span class="tab-icon" aria-hidden="true">📷</span> Camera + Flash
+                <span class="ti" aria-hidden="true">📷</span>Camera
             </button>
             <button class="tab-btn" id="micTab" data-mode="mic" role="tab" aria-selected="false"
                 aria-controls="micPanel">
-                <span class="tab-icon" aria-hidden="true">🎙️</span> Microphone
+                <span class="ti" aria-hidden="true">🎙️</span>Mic
+            </button>
+            <button class="tab-btn" id="uploadTab" data-mode="upload" role="tab" aria-selected="false"
+                aria-controls="uploadPanel">
+                <span class="ti" aria-hidden="true">📁</span>Upload
             </button>
         </nav>
 
-        <!-- ── CAMERA PANEL ── -->
+        <!-- ══════════════════════════════
+         CAMERA PANEL
+    ══════════════════════════════ -->
         <section class="mode-panel active" id="cameraPanel" role="tabpanel" aria-labelledby="cameraTab">
 
-            <!-- Sensor visual -->
             <div class="sensor-visual" id="cameraSensorVisual">
-                <div class="pulse-ring-container">
-                    <div class="pulse-ring r1" aria-hidden="true"></div>
-                    <div class="pulse-ring r2" aria-hidden="true"></div>
-                    <div class="pulse-ring r3" aria-hidden="true"></div>
+                <div class="ring-wrap">
+                    <div class="ring-pulse r1" aria-hidden="true"></div>
+                    <div class="ring-pulse r2" aria-hidden="true"></div>
+                    <div class="ring-pulse r3" aria-hidden="true"></div>
+                    <svg class="gauge-svg" viewBox="0 0 130 130" aria-hidden="true">
+                        <circle class="gauge-track" cx="65" cy="65" r="55" />
+                        <circle class="gauge-prog" id="cameraGauge" cx="65" cy="65" r="55" />
+                    </svg>
                     <span class="finger-icon" aria-hidden="true">🫵</span>
                 </div>
-                <p class="sensor-label">
-                    Cover your <strong>rear camera lens</strong> firmly with your fingertip. The flash will turn on
-                    automatically.
-                </p>
+                <p class="sensor-label">Cover your <strong>rear camera</strong> with your fingertip. The flash will
+                    activate automatically.</p>
             </div>
 
-            <!-- BPM Display -->
             <div class="bpm-card" id="cameraBpmCard">
-                <div class="bpm-label">Heart Rate</div>
-                <div class="bpm-value" id="cameraBpmValue" aria-live="polite" aria-label="BPM reading">--</div>
-                <div class="bpm-unit">BPM</div>
+                <div class="bpm-top">
+                    <span class="bpm-label">Heart Rate</span>
+                    <span class="bpm-zone-badge" id="cameraZoneBadge">Resting</span>
+                </div>
+                <div class="bpm-main">
+                    <span class="bpm-value" id="cameraBpmValue" aria-live="polite">--</span>
+                    <span class="bpm-unit">BPM</span>
+                </div>
                 <div class="bpm-status" id="cameraBpmStatus">Press Start to begin measuring</div>
             </div>
 
-            <!-- History -->
-            <div class="history-card" id="cameraHistoryCard">
+            <div class="vitals-row" id="cameraVitals">
+                <div class="vital-card">
+                    <span class="vital-icon">🩺</span>
+                    <span class="vital-label">Est. Systolic</span>
+                    <span class="vital-value" id="cameraSystolic">--</span>
+                    <span class="vital-unit">mmHg</span>
+                </div>
+                <div class="vital-card">
+                    <span class="vital-icon">💧</span>
+                    <span class="vital-label">Est. Diastolic</span>
+                    <span class="vital-value" id="cameraDiastolic">--</span>
+                    <span class="vital-unit">mmHg</span>
+                </div>
+            </div>
+
+            <div class="history-card">
                 <h3>Recent Readings</h3>
                 <div class="history-bars" id="cameraHistoryBars">
                     <p class="history-empty">No readings yet</p>
                 </div>
             </div>
 
-            <!-- Controls -->
-            <div class="controls">
-                <button class="btn-start" id="cameraStartBtn" aria-label="Start camera measurement">
-                    <span class="btn-icon" aria-hidden="true">▶</span>Start Measuring
-                </button>
+            <div class="disclaimer">
+                <span>⚠️</span>
+                Blood pressure values are <strong>estimates only</strong>, based on BPM zone averages. Not for medical
+                use.
             </div>
+
+            <button class="btn-start" id="cameraStartBtn">
+                <span class="btn-icon" aria-hidden="true">▶</span>Start Measuring
+            </button>
 
         </section>
 
-        <!-- ── MIC PANEL ── -->
+        <!-- ══════════════════════════════
+         MIC PANEL
+    ══════════════════════════════ -->
         <section class="mode-panel" id="micPanel" role="tabpanel" aria-labelledby="micTab">
 
-            <!-- Sensor visual -->
             <div class="mic-visual" id="micSensorVisual">
                 <div class="mic-icon-wrap">
                     <div class="mic-ring r1" aria-hidden="true"></div>
                     <div class="mic-ring r2" aria-hidden="true"></div>
                     <span class="mic-icon" aria-hidden="true">🎙️</span>
                 </div>
-                <div class="waveform-canvas-wrap">
+                <div class="waveform-wrap">
                     <canvas id="waveformCanvas" aria-hidden="true"></canvas>
                 </div>
-                <p class="sensor-label">
-                    Press your phone's <strong>microphone</strong> firmly against your chest. Stay still and breathe
-                    slowly.
-                </p>
+                <p class="sensor-label">Press your phone's <strong>microphone</strong> firmly against your chest. Stay
+                    still.</p>
             </div>
 
-            <!-- BPM Display -->
             <div class="bpm-card" id="micBpmCard">
-                <div class="bpm-label">Heart Rate</div>
-                <div class="bpm-value" id="micBpmValue" aria-live="polite" aria-label="BPM reading">--</div>
-                <div class="bpm-unit">BPM</div>
+                <div class="bpm-top">
+                    <span class="bpm-label">Heart Rate</span>
+                    <span class="bpm-zone-badge" id="micZoneBadge">Listening</span>
+                </div>
+                <div class="bpm-main">
+                    <span class="bpm-value" id="micBpmValue" aria-live="polite">--</span>
+                    <span class="bpm-unit">BPM</span>
+                </div>
                 <div class="bpm-status" id="micBpmStatus">Press Start to begin measuring</div>
             </div>
 
-            <!-- History -->
-            <div class="history-card" id="micHistoryCard">
+            <div class="vitals-row">
+                <div class="vital-card">
+                    <span class="vital-icon">🩺</span>
+                    <span class="vital-label">Est. Systolic</span>
+                    <span class="vital-value" id="micSystolic">--</span>
+                    <span class="vital-unit">mmHg</span>
+                </div>
+                <div class="vital-card">
+                    <span class="vital-icon">💧</span>
+                    <span class="vital-label">Est. Diastolic</span>
+                    <span class="vital-value" id="micDiastolic">--</span>
+                    <span class="vital-unit">mmHg</span>
+                </div>
+            </div>
+
+            <div class="history-card">
                 <h3>Recent Readings</h3>
                 <div class="history-bars" id="micHistoryBars">
                     <p class="history-empty">No readings yet</p>
                 </div>
             </div>
 
-            <!-- Controls -->
-            <div class="controls">
-                <button class="btn-start" id="micStartBtn" aria-label="Start microphone measurement">
-                    <span class="btn-icon" aria-hidden="true">▶</span>Start Measuring
-                </button>
+            <div class="disclaimer">
+                <span>⚠️</span>
+                Blood pressure values are <strong>estimates only</strong>, based on BPM zone averages. Not for medical
+                use.
+            </div>
+
+            <button class="btn-start" id="micStartBtn">
+                <span class="btn-icon" aria-hidden="true">▶</span>Start Measuring
+            </button>
+
+        </section>
+
+        <!-- ══════════════════════════════
+         UPLOAD PANEL
+    ══════════════════════════════ -->
+        <section class="mode-panel" id="uploadPanel" role="tabpanel" aria-labelledby="uploadTab">
+
+            <!-- Drop zone -->
+            <div class="upload-visual" id="uploadDropzone" role="button" tabindex="0" aria-label="Upload video file">
+                <div class="upload-icon-wrap" aria-hidden="true">📹</div>
+                <h3>Upload Your Recording</h3>
+                <p>Record a video with flash ON in your camera app,<br>then upload it here for analysis.</p>
+                <button class="upload-btn" id="uploadPickBtn" type="button">Choose Video File</button>
+                <input type="file" id="videoFileInput" accept="video/*" />
+            </div>
+
+            <!-- Progress -->
+            <div class="upload-progress" id="uploadProgress">
+                <div class="progress-label">
+                    <span id="progressLabel">Analyzing video…</span>
+                    <span id="progressPct">0%</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+            </div>
+
+            <!-- BPM result -->
+            <div class="bpm-card" id="uploadBpmCard">
+                <div class="bpm-top">
+                    <span class="bpm-label">Heart Rate</span>
+                    <span class="bpm-zone-badge" id="uploadZoneBadge">Ready</span>
+                </div>
+                <div class="bpm-main">
+                    <span class="bpm-value" id="uploadBpmValue" aria-live="polite">--</span>
+                    <span class="bpm-unit">BPM</span>
+                </div>
+                <div class="bpm-status" id="uploadBpmStatus">Select a video to begin</div>
+            </div>
+
+            <div class="vitals-row">
+                <div class="vital-card">
+                    <span class="vital-icon">🩺</span>
+                    <span class="vital-label">Est. Systolic</span>
+                    <span class="vital-value" id="uploadSystolic">--</span>
+                    <span class="vital-unit">mmHg</span>
+                </div>
+                <div class="vital-card">
+                    <span class="vital-icon">💧</span>
+                    <span class="vital-label">Est. Diastolic</span>
+                    <span class="vital-value" id="uploadDiastolic">--</span>
+                    <span class="vital-unit">mmHg</span>
+                </div>
+            </div>
+
+            <div class="history-card">
+                <h3>Analysis History</h3>
+                <div class="history-bars" id="uploadHistoryBars">
+                    <p class="history-empty">No readings yet</p>
+                </div>
+            </div>
+
+            <div class="disclaimer">
+                <span>⚠️</span>
+                Make sure the video was recorded with the <strong>flash/torch on</strong> and your finger covering the
+                lens. Blood pressure values are estimates only — not for medical use.
             </div>
 
         </section>
 
     </div><!-- /.app-wrapper -->
 
-    <!-- Hidden media elements for camera processing -->
+    <!-- Hidden media elements -->
     <video id="cameraVideo" playsinline muted autoplay aria-hidden="true"></video>
     <canvas id="cameraCanvas" aria-hidden="true"></canvas>
 

@@ -1,765 +1,753 @@
 /**
  * BPM Heart — app.js
- * 2-in-1 Heart Rate Monitor
- * Camera+Flash mode    → red channel peak detection
- * Microphone mode      → BiquadFilter + RMS spike detection
+ * 3-in-1 Heart Rate Monitor
+ *  Mode 1: Camera + Flash  → live red-channel peak detection
+ *  Mode 2: Microphone      → BiquadFilter (50Hz) + RMS spike detection
+ *  Mode 3: Video Upload    → frame-by-frame red-channel analysis of a recorded video
+ *
+ * Blood Pressure: population-average estimates keyed on BPM zone (not diagnostic).
  */
 
 'use strict';
 
 // ─────────────────────────────────────────────
-// PWA: Service Worker Registration
+// SERVICE WORKER
 // ─────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js')
-            .then(reg => console.log('[SW] Registered:', reg.scope))
-            .catch(err => console.warn('[SW] Registration failed:', err));
+            .then(r => console.log('[SW] scope:', r.scope))
+            .catch(e => console.warn('[SW] failed:', e));
     });
 }
 
 // ─────────────────────────────────────────────
-// PWA: Install Banner
+// PWA INSTALL BANNER
 // ─────────────────────────────────────────────
-let deferredInstallPrompt = null;
+let deferredPrompt = null;
 const installBanner = document.getElementById('installBanner');
 
-window.addEventListener('beforeinstallprompt', (e) => {
+window.addEventListener('beforeinstallprompt', e => {
     e.preventDefault();
-    deferredInstallPrompt = e;
+    deferredPrompt = e;
     installBanner.classList.add('visible');
 });
-
 installBanner.addEventListener('click', async () => {
-    if (!deferredInstallPrompt) return;
-    deferredInstallPrompt.prompt();
-    const { outcome } = await deferredInstallPrompt.userChoice;
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
     if (outcome === 'accepted') installBanner.classList.remove('visible');
-    deferredInstallPrompt = null;
+    deferredPrompt = null;
 });
-
 window.addEventListener('appinstalled', () => {
     installBanner.classList.remove('visible');
-    showToast('✅ App installed! You can now use it offline.');
+    toast('✅ App installed — works offline now!');
 });
 
 // ─────────────────────────────────────────────
 // TOAST
 // ─────────────────────────────────────────────
-let toastTimer = null;
-function showToast(msg, duration = 3500) {
+let _toastTimer;
+function toast(msg, ms = 3800) {
     const el = document.getElementById('toast');
     el.textContent = msg;
     el.classList.add('show');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove('show'), duration);
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => el.classList.remove('show'), ms);
 }
 
 // ─────────────────────────────────────────────
-// DOM ELEMENTS
+// DOM REFS
 // ─────────────────────────────────────────────
-
 // Tabs
-const cameraTab = document.getElementById('cameraTab');
-const micTab = document.getElementById('micTab');
-const cameraPanel = document.getElementById('cameraPanel');
-const micPanel = document.getElementById('micPanel');
+const tabs = { camera: document.getElementById('cameraTab'), mic: document.getElementById('micTab'), upload: document.getElementById('uploadTab') };
+const panels = { camera: document.getElementById('cameraPanel'), mic: document.getElementById('micPanel'), upload: document.getElementById('uploadPanel') };
 
 // Camera
-const cameraSensorVisual = document.getElementById('cameraSensorVisual');
-const cameraBpmValue = document.getElementById('cameraBpmValue');
-const cameraBpmStatus = document.getElementById('cameraBpmStatus');
-const cameraBpmCard = document.getElementById('cameraBpmCard');
-const cameraHistoryBars = document.getElementById('cameraHistoryBars');
-const cameraStartBtn = document.getElementById('cameraStartBtn');
-const cameraVideo = document.getElementById('cameraVideo');
-const cameraCanvas = document.getElementById('cameraCanvas');
+const $ = id => document.getElementById(id);
+const cameraSensorVisual = $('cameraSensorVisual');
+const cameraGauge = $('cameraGauge');
+const cameraBpmValue = $('cameraBpmValue');
+const cameraBpmStatus = $('cameraBpmStatus');
+const cameraBpmCard = $('cameraBpmCard');
+const cameraZoneBadge = $('cameraZoneBadge');
+const cameraHistoryBars = $('cameraHistoryBars');
+const cameraStartBtn = $('cameraStartBtn');
+const cameraVideo = $('cameraVideo');
+const cameraCanvas = $('cameraCanvas');
+const cameraSystolic = $('cameraSystolic');
+const cameraDiastolic = $('cameraDiastolic');
 
 // Mic
-const micSensorVisual = document.getElementById('micSensorVisual');
-const micBpmValue = document.getElementById('micBpmValue');
-const micBpmStatus = document.getElementById('micBpmStatus');
-const micBpmCard = document.getElementById('micBpmCard');
-const micHistoryBars = document.getElementById('micHistoryBars');
-const micStartBtn = document.getElementById('micStartBtn');
-const waveformCanvas = document.getElementById('waveformCanvas');
+const micSensorVisual = $('micSensorVisual');
+const micBpmValue = $('micBpmValue');
+const micBpmStatus = $('micBpmStatus');
+const micBpmCard = $('micBpmCard');
+const micZoneBadge = $('micZoneBadge');
+const micHistoryBars = $('micHistoryBars');
+const micStartBtn = $('micStartBtn');
+const micSystolic = $('micSystolic');
+const micDiastolic = $('micDiastolic');
+const waveformCanvas = $('waveformCanvas');
+
+// Upload
+const uploadDropzone = $('uploadDropzone');
+const uploadPickBtn = $('uploadPickBtn');
+const videoFileInput = $('videoFileInput');
+const uploadProgress = $('uploadProgress');
+const progressFill = $('progressFill');
+const progressPct = $('progressPct');
+const progressLabel = $('progressLabel');
+const uploadBpmValue = $('uploadBpmValue');
+const uploadBpmStatus = $('uploadBpmStatus');
+const uploadBpmCard = $('uploadBpmCard');
+const uploadZoneBadge = $('uploadZoneBadge');
+const uploadHistoryBars = $('uploadHistoryBars');
+const uploadSystolic = $('uploadSystolic');
+const uploadDiastolic = $('uploadDiastolic');
+
+// Canvas context
+const ctx2d = cameraCanvas.getContext('2d', { willReadFrequently: true });
+const GAUGE_CIRC = 345; // 2π × 55
 
 // ─────────────────────────────────────────────
 // TAB SWITCHING
 // ─────────────────────────────────────────────
-let activeMode = 'camera'; // 'camera' | 'mic'
+let activeMode = 'camera';
 
 function switchTab(mode) {
     if (mode === activeMode) return;
-
-    // Stop current mode if measuring
-    if (activeMode === 'camera' && cameraState.measuring) stopCamera();
+    if (activeMode === 'camera' && camState.measuring) stopCamera();
     if (activeMode === 'mic' && micState.measuring) stopMic();
-
     activeMode = mode;
 
-    cameraTab.classList.toggle('active', mode === 'camera');
-    micTab.classList.toggle('active', mode === 'mic');
-    cameraTab.setAttribute('aria-selected', mode === 'camera');
-    micTab.setAttribute('aria-selected', mode === 'mic');
-
-    cameraPanel.classList.toggle('active', mode === 'camera');
-    micPanel.classList.toggle('active', mode === 'mic');
+    Object.keys(tabs).forEach(k => {
+        const active = k === mode;
+        tabs[k].classList.toggle('active', active);
+        tabs[k].setAttribute('aria-selected', active);
+        panels[k].classList.toggle('active', active);
+    });
 }
 
-cameraTab.addEventListener('click', () => switchTab('camera'));
-micTab.addEventListener('click', () => switchTab('mic'));
+Object.keys(tabs).forEach(k => tabs[k].addEventListener('click', () => switchTab(k)));
 
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════════════
+
+function movingAvg(arr, w) {
+    return arr.map((_, i) => {
+        const sl = arr.slice(Math.max(0, i - w + 1), i + 1);
+        return sl.reduce((a, b) => a + b, 0) / sl.length;
+    });
+}
+
+function medianIBI(peakTimes) {
+    if (peakTimes.length < 3) return null;
+    const ibis = [];
+    for (let i = 1; i < peakTimes.length; i++) ibis.push(peakTimes[i] - peakTimes[i - 1]);
+    const valid = ibis.filter(v => v >= 280 && v <= 1600);
+    if (valid.length < 2) return null;
+    valid.sort((a, b) => a - b);
+    return valid[Math.floor(valid.length / 2)];
+}
+
+/** Blood pressure estimate based on BPM zone (population averages, not diagnostic) */
+function estimateBP(bpm) {
+    if (bpm < 50) return { sys: 102, dia: 64 };
+    if (bpm < 60) return { sys: 108, dia: 68 };
+    if (bpm < 70) return { sys: 115, dia: 73 };
+    if (bpm < 80) return { sys: 120, dia: 78 };
+    if (bpm < 90) return { sys: 126, dia: 82 };
+    if (bpm < 100) return { sys: 130, dia: 85 };
+    if (bpm < 120) return { sys: 138, dia: 89 };
+    return { sys: 145, dia: 93 };
+}
+
+function classifyZone(bpm) {
+    if (bpm < 50) return 'Very Low';
+    if (bpm < 60) return 'Low';
+    if (bpm < 80) return 'Resting';
+    if (bpm < 100) return 'Normal';
+    if (bpm < 120) return 'Elevated';
+    return 'High';
+}
+
+function setGauge(bpm) {
+    // Map 40–180 BPM to 0–100% of gauge arc
+    const pct = Math.min(Math.max((bpm - 40) / 140, 0), 1);
+    cameraGauge.style.strokeDashoffset = GAUGE_CIRC - pct * GAUGE_CIRC;
+}
+
+function renderHistory(container, history, clr) {
+    if (!history.length) { container.innerHTML = '<p class="history-empty">No readings yet</p>'; return; }
+    const maxB = Math.max(...history, 100);
+    const minB = Math.min(...history, 60);
+    const range = maxB - minB || 40;
+    container.innerHTML = '';
+    history.forEach(bpm => {
+        const hPx = Math.max(6, Math.round(((bpm - minB) / range) * 48 + 8));
+        const wrap = document.createElement('div');
+        wrap.className = 'bar-wrap';
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.height = hPx + 'px';
+        bar.style.background = clr === 'red' ? 'linear-gradient(180deg, rgba(255,45,85,.85),  rgba(255,45,85,.25))' :
+            clr === 'teal' ? 'linear-gradient(180deg, rgba(0,229,204,.85),  rgba(0,229,204,.25))' :
+                'linear-gradient(180deg, rgba(74,144,255,.85), rgba(74,144,255,.25))';
+        const lbl = document.createElement('span'); lbl.textContent = bpm;
+        bar.appendChild(lbl); wrap.appendChild(bar); container.appendChild(wrap);
+    });
+}
+
+// ═══════════════════════════════════════════════════
 // 1. CAMERA + FLASH MODE
-// ─────────────────────────────────────────────
-
-const cameraState = {
-    measuring: false,
-    stream: null,
-    loopId: null,
-    redBuffer: [],          // rolling buffer of avg red values
-    timestamps: [],         // timestamps matching redBuffer
-    peakTimes: [],          // timestamps of detected peaks
-    bpmHistory: [],
-    smoothed: [],
-    bufferSize: 180,        // ~6 seconds at 30fps
-    lastPeakTime: 0,
-    dynamicThreshold: 128,
+// ═══════════════════════════════════════════════════
+const camState = {
+    measuring: false, stream: null, loopId: null,
+    redBuf: [], timestamps: [], peaks: [], history: [],
+    lastPeak: 0,
 };
 
-// Canvas context for pixel analysis
-const ctx2d = cameraCanvas.getContext('2d', { willReadFrequently: true });
-
 cameraStartBtn.addEventListener('click', () => {
-    if (cameraState.measuring) stopCamera();
-    else startCamera();
+    if (camState.measuring) stopCamera(); else startCamera();
 });
 
 async function startCamera() {
-    // Reset state
-    Object.assign(cameraState, {
-        redBuffer: [], timestamps: [], peakTimes: [],
-        bpmHistory: [], smoothed: [], lastPeakTime: 0, dynamicThreshold: 128,
-    });
-
-    setCameraBpm('--');
-    setCameraStatus('Requesting camera permission…', '');
+    Object.assign(camState, { redBuf: [], timestamps: [], peaks: [], lastPeak: 0 });
+    setCameraDisplay('--', 'Requesting camera permission…', '', false);
     setCameraBtn(true);
 
-    // ── Step 1: try getUserMedia WITH torch baked into constraints (best for iOS) ──
-    let stream;
-    let torchGranted = false;
+    let stream, torchGranted = false;
+
+    // Step 1 — getUserMedia with torch in constraint (iOS path)
     try {
         stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: { exact: 'environment' },
-                width: { ideal: 320 },
-                height: { ideal: 240 },
-                frameRate: { ideal: 30 },
-                advanced: [{ torch: true }],
-            },
+            video: { facingMode: { exact: 'environment' }, width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 30 }, advanced: [{ torch: true }] },
             audio: false,
         });
         torchGranted = true;
-        console.log('[Camera] Torch via getUserMedia constraint ✔');
-    } catch (firstErr) {
-        // Torch-in-constraint failed (common on iOS) — retry without it
-        console.warn('[Camera] getUserMedia+torch failed:', firstErr.message, '— retrying without torch constraint');
+        console.log('[Cam] torch via getUserMedia ✔');
+    } catch (e1) {
+        console.warn('[Cam] torch in getUserMedia failed:', e1.message);
+        // Step 2 — retry without torch
         try {
             stream = await navigator.mediaDevices.getUserMedia({
-                video: {
-                    facingMode: { exact: 'environment' },
-                    width: { ideal: 320 },
-                    height: { ideal: 240 },
-                    frameRate: { ideal: 30 },
-                },
+                video: { facingMode: { exact: 'environment' }, width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 30 } },
                 audio: false,
             });
-        } catch (secondErr) {
-            console.error('[Camera]', secondErr);
+        } catch (e2) {
             setCameraBtn(false);
-            cameraSensorVisual.classList.remove('measuring');
-            if (secondErr.name === 'NotAllowedError') {
-                setCameraStatus('❌ Camera permission denied. Enable it in settings.', 'err');
-                showToast('Camera access denied.');
-            } else if (secondErr.name === 'OverconstrainedError') {
-                showToast('Rear camera not found – trying any camera…');
-                retryCameraAnyFacing();
-            } else {
-                setCameraStatus('❌ Camera error: ' + secondErr.message, 'err');
-            }
+            if (e2.name === 'NotAllowedError') setCameraDisplay('--', '❌ Camera permission denied.', 'err', false);
+            else if (e2.name === 'OverconstrainedError') { toast('Rear camera not found — trying any camera…'); retryCam(); }
+            else setCameraDisplay('--', '❌ ' + e2.message, 'err', false);
             return;
         }
     }
 
     try {
-        cameraState.stream = stream;
+        camState.stream = stream;
         cameraVideo.srcObject = stream;
         await cameraVideo.play();
-
         cameraCanvas.width = cameraVideo.videoWidth || 320;
         cameraCanvas.height = cameraVideo.videoHeight || 240;
 
-        // ── Step 2: try applyConstraints as Android fallback (if step 1 didn't grant torch) ──
+        // Step 3 — applyConstraints fallback (Android)
         if (!torchGranted) {
-            const [track] = stream.getVideoTracks();
-            if (track && 'applyConstraints' in track) {
+            const [t] = stream.getVideoTracks();
+            if (t?.applyConstraints) {
                 try {
-                    const caps = track.getCapabilities ? track.getCapabilities() : {};
-                    if (caps && caps.torch) {
-                        await track.applyConstraints({ advanced: [{ torch: true }] });
-                        torchGranted = true;
-                        console.log('[Camera] Torch via applyConstraints ✔');
-                    }
-                } catch (e) {
-                    console.warn('[Camera] applyConstraints torch failed:', e.message);
-                }
+                    const caps = t.getCapabilities?.() ?? {};
+                    if (caps.torch) { await t.applyConstraints({ advanced: [{ torch: true }] }); torchGranted = true; console.log('[Cam] torch via applyConstraints ✔'); }
+                } catch { }
             }
             if (!torchGranted) {
-                // iOS Safari / devices where torch is not web-accessible
-                showToast('💡 Flash not available in browser. Turn on your torch app manually, then measure.');
-                setCameraStatus('📡 Detecting pulse… (manual torch needed)', 'warn');
+                toast('💡 Flash unavailable in browser — turn on torch manually, then measure.');
+                setCameraDisplay('--', '📡 Detecting pulse… (use manual torch)', 'warn', false);
             }
         }
 
-        cameraState.measuring = true;
+        camState.measuring = true;
         cameraSensorVisual.classList.add('measuring');
-        if (torchGranted) setCameraStatus('📡 Detecting pulse… keep finger still', '');
-        cameraState.loopId = requestAnimationFrame(cameraLoop);
-
-    } catch (err) {
-        console.error('[Camera] Setup error:', err);
+        if (torchGranted) setCameraDisplay('--', '📡 Detecting pulse… keep finger still', '', false);
+        camState.loopId = requestAnimationFrame(camLoop);
+    } catch (e) {
         setCameraBtn(false);
         cameraSensorVisual.classList.remove('measuring');
-        setCameraStatus('❌ Camera error: ' + err.message, 'err');
+        setCameraDisplay('--', '❌ ' + e.message, 'err', false);
     }
 }
 
-async function retryCameraAnyFacing() {
+async function retryCam() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 30 } },
-            audio: false,
-        });
-        cameraState.stream = stream;
-        cameraVideo.srcObject = stream;
+        const s = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 30 } }, audio: false });
+        camState.stream = s;
+        cameraVideo.srcObject = s;
         await cameraVideo.play();
         cameraCanvas.width = cameraVideo.videoWidth || 320;
         cameraCanvas.height = cameraVideo.videoHeight || 240;
-        cameraState.measuring = true;
+        camState.measuring = true;
         cameraSensorVisual.classList.add('measuring');
-        setCameraStatus('📡 Detecting pulse… keep finger still', '');
-        cameraState.loopId = requestAnimationFrame(cameraLoop);
-    } catch (err) {
-        setCameraBtn(false);
-        setCameraStatus('❌ Could not access any camera.', 'err');
-    }
+        setCameraDisplay('--', '📡 Detecting pulse… keep finger still', '', false);
+        camState.loopId = requestAnimationFrame(camLoop);
+    } catch { setCameraBtn(false); setCameraDisplay('--', '❌ Could not access any camera.', 'err', false); }
 }
 
 function stopCamera() {
-    cancelAnimationFrame(cameraState.loopId);
-    if (cameraState.stream) {
-        cameraState.stream.getTracks().forEach(t => {
-            // Turn off torch before stopping
-            if ('applyConstraints' in t) {
-                try { t.applyConstraints({ advanced: [{ torch: false }] }); } catch { }
-            }
-            t.stop();
-        });
-        cameraState.stream = null;
-    }
+    cancelAnimationFrame(camState.loopId);
+    camState.stream?.getTracks().forEach(t => {
+        try { t.applyConstraints({ advanced: [{ torch: false }] }); } catch { }
+        t.stop();
+    });
+    camState.stream = null;
     cameraVideo.srcObject = null;
-    cameraState.measuring = false;
+    camState.measuring = false;
     cameraSensorVisual.classList.remove('measuring');
     setCameraBtn(false);
-    setCameraStatus('Stopped. Press Start to measure again.', '');
+    setCameraDisplay(cameraBpmValue.textContent, 'Stopped. Press Start to measure again.', '', false);
 }
 
-function cameraLoop() {
-    if (!cameraState.measuring) return;
+function camLoop() {
+    if (!camState.measuring) return;
+    try { ctx2d.drawImage(cameraVideo, 0, 0, cameraCanvas.width, cameraCanvas.height); } catch { camState.loopId = requestAnimationFrame(camLoop); return; }
 
-    // Draw frame to canvas and read pixels
-    try {
-        ctx2d.drawImage(cameraVideo, 0, 0, cameraCanvas.width, cameraCanvas.height);
-    } catch {
-        cameraState.loopId = requestAnimationFrame(cameraLoop);
-        return;
-    }
+    const cx = (cameraCanvas.width / 2) | 0;
+    const cy = (cameraCanvas.height / 2) | 0;
+    const SZ = 80;
+    let imgData;
+    try { imgData = ctx2d.getImageData(Math.max(0, cx - SZ / 2), Math.max(0, cy - SZ / 2), SZ, SZ); } catch { camState.loopId = requestAnimationFrame(camLoop); return; }
 
-    // Sample center 60×60 px region for accuracy
-    const cx = Math.floor(cameraCanvas.width / 2);
-    const cy = Math.floor(cameraCanvas.height / 2);
-    const size = 60;
-    const x0 = Math.max(0, cx - size / 2);
-    const y0 = Math.max(0, cy - size / 2);
-
-    let imageData;
-    try {
-        imageData = ctx2d.getImageData(x0, y0, size, size);
-    } catch {
-        cameraState.loopId = requestAnimationFrame(cameraLoop);
-        return;
-    }
-
-    const data = imageData.data;
-    let redSum = 0;
-    const pixelCount = size * size;
-
-    for (let i = 0; i < data.length; i += 4) {
-        redSum += data[i]; // R channel
-    }
-
-    const avgRed = redSum / pixelCount;
+    const d = imgData.data;
+    let rSum = 0;
+    for (let i = 0; i < d.length; i += 4) rSum += d[i];
+    const avgRed = rSum / (SZ * SZ);
     const now = performance.now();
 
-    cameraState.redBuffer.push(avgRed);
-    cameraState.timestamps.push(now);
+    camState.redBuf.push(avgRed);
+    camState.timestamps.push(now);
+    if (camState.redBuf.length > 200) { camState.redBuf.shift(); camState.timestamps.shift(); }
 
-    // Keep buffer capped
-    if (cameraState.redBuffer.length > cameraState.bufferSize) {
-        cameraState.redBuffer.shift();
-        cameraState.timestamps.shift();
+    if (camState.redBuf.length >= 90) {
+        const sm = movingAvg(camState.redBuf, 6);
+        detectPeaks(sm, camState.timestamps, camState.peaks, camState, 'camera');
     }
-
-    // Apply smoothing (moving average over 5 samples)
-    const MA = 5;
-    cameraState.smoothed = smoothMovingAverage(cameraState.redBuffer, MA);
-
-    // Need at least 90 frames (~3s) before peak detection
-    if (cameraState.smoothed.length >= 90) {
-        detectCameraPeaks(cameraState.smoothed, cameraState.timestamps);
-    }
-
-    cameraState.loopId = requestAnimationFrame(cameraLoop);
+    camState.loopId = requestAnimationFrame(camLoop);
 }
 
-function smoothMovingAverage(arr, window) {
-    const out = [];
-    for (let i = 0; i < arr.length; i++) {
-        const start = Math.max(0, i - window + 1);
-        const slice = arr.slice(start, i + 1);
-        out.push(slice.reduce((a, b) => a + b, 0) / slice.length);
-    }
-    return out;
-}
-
-function detectCameraPeaks(smoothed, timestamps) {
-    // Dynamic threshold: mean + fraction of amplitude
-    const n = smoothed.length;
-    const recent = smoothed.slice(-60); // look at last 2s
-    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
-    const min = Math.min(...recent);
-    const max = Math.max(...recent);
-    const amp = max - min;
-
-    // Require a meaningful signal (not just noise or covered lens)
-    if (amp < 2) {
-        setCameraStatus('🔴 Low signal. Cover lens completely & stay still.', 'warn');
-        return;
-    }
-
-    const threshold = mean + amp * 0.35;
-
-    // Find peaks in the last 60 frames
-    const searchStart = n - 60;
-    for (let i = searchStart + 1; i < n - 1; i++) {
-        const prev = smoothed[i - 1];
-        const curr = smoothed[i];
-        const next = smoothed[i + 1];
-        const t = timestamps[i];
-
-        if (curr > threshold && curr >= prev && curr >= next) {
-            // Enforce refractory period: min 300ms between peaks (~200 BPM max)
-            if (t - cameraState.lastPeakTime > 300) {
-                cameraState.peakTimes.push(t);
-                cameraState.lastPeakTime = t;
-            }
-        }
-    }
-
-    // Trim peak history to last 10
-    if (cameraState.peakTimes.length > 12) {
-        cameraState.peakTimes = cameraState.peakTimes.slice(-12);
-    }
-
-    updateCameraBpm();
-}
-
-function updateCameraBpm() {
-    const pts = cameraState.peakTimes;
-    if (pts.length < 3) {
-        const needed = 3 - pts.length;
-        setCameraStatus(`📡 Detecting pulse… need ${needed} more beat${needed > 1 ? 's' : ''}`, '');
-        return;
-    }
-
-    // Compute inter-beat intervals
-    const ibis = [];
-    for (let i = 1; i < pts.length; i++) {
-        ibis.push(pts[i] - pts[i - 1]);
-    }
-
-    // Filter out physiologically implausible IBIs (300ms – 1500ms = 40-200 BPM)
-    const validIbis = ibis.filter(ibi => ibi >= 300 && ibi <= 1500);
-    if (validIbis.length < 2) return;
-
-    // Use median for robustness against outliers
-    validIbis.sort((a, b) => a - b);
-    const medianIbi = validIbis[Math.floor(validIbis.length / 2)];
-    const bpm = Math.round(60000 / medianIbi);
-
-    if (bpm < 40 || bpm > 200) return;
-
-    setCameraBpm(bpm);
-    setCameraStatus(`✅ Good signal — ${classifyBpm(bpm)}`, 'ok');
-
-    // Record to history
-    cameraState.bpmHistory.push(bpm);
-    if (cameraState.bpmHistory.length > 10) cameraState.bpmHistory.shift();
-    renderHistory(cameraHistoryBars, cameraState.bpmHistory, 'red');
-}
-
-// ─────────────────────────────────────────────
-// 2. MICROPHONE MODE
-// ─────────────────────────────────────────────
-
+// ═══════════════════════════════════════════════════
+// 2. MIC MODE
+// ═══════════════════════════════════════════════════
 const micState = {
-    measuring: false,
-    stream: null,
-    audioCtx: null,
-    sourceNode: null,
-    filterNode: null,
-    analyserNode: null,
-    loopId: null,
-    peakTimes: [],
-    bpmHistory: [],
-    lastPeakTime: 0,
-    rmsSamples: [],
-    rmsWindow: 30,
+    measuring: false, stream: null, audioCtx: null,
+    analyserNode: null, loopId: null,
+    peaks: [], history: [], lastPeak: 0, rmsSamples: [],
 };
 
 // Waveform canvas
 const wCtx = waveformCanvas.getContext('2d');
-const WW = 360, WH = 70;
-waveformCanvas.width = WW;
-waveformCanvas.height = WH;
+const WW = 360, WH = 64;
+waveformCanvas.width = WW; waveformCanvas.height = WH;
 
-micStartBtn.addEventListener('click', () => {
-    if (micState.measuring) stopMic();
-    else startMic();
-});
+micStartBtn.addEventListener('click', () => { if (micState.measuring) stopMic(); else startMic(); });
 
 async function startMic() {
-    Object.assign(micState, {
-        stream: null, audioCtx: null, sourceNode: null,
-        filterNode: null, analyserNode: null, loopId: null,
-        peakTimes: [], bpmHistory: [], lastPeakTime: 0,
-        rmsSamples: [],
-    });
-
-    setMicBpm('--');
-    setMicStatus('Requesting microphone permission…', '');
+    Object.assign(micState, { stream: null, audioCtx: null, analyserNode: null, loopId: null, peaks: [], lastPeak: 0, rmsSamples: [] });
+    setMicDisplay('--', 'Requesting microphone…', '', false);
     setMicBtn(true);
 
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
-            }
-        });
-
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
         micState.stream = stream;
 
-        // Build Web Audio graph:
-        // MediaStreamSource → BiquadFilter (lowpass 50Hz) → Gain (20×) → Analyser
-        const AudioContext = window.AudioContext || window.webkitAudioContext;
-        const audioCtx = new AudioContext();
+        const AC = window.AudioContext || window.webkitAudioContext;
+        const audioCtx = new AC();
         micState.audioCtx = audioCtx;
 
-        const sourceNode = audioCtx.createMediaStreamSource(stream);
-        micState.sourceNode = sourceNode;
+        const src = audioCtx.createMediaStreamSource(stream);
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'lowpass'; filter.frequency.value = 50; filter.Q.value = 0.5;
+        const gain = audioCtx.createGain();
+        gain.gain.value = 20;
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.3;
+        micState.analyserNode = analyser;
 
-        // Lowpass at 50Hz — heartbeat thuds live in the 20–50Hz band.
-        // This aggressively kills breathing, talking, and ambient noise.
-        const filterNode = audioCtx.createBiquadFilter();
-        filterNode.type = 'lowpass';
-        filterNode.frequency.value = 50;  // ← was 100Hz
-        filterNode.Q.value = 0.5;         // gentle roll-off
-        micState.filterNode = filterNode;
-
-        // Gain: amplify the very-quiet filtered heartbeat signal 20×
-        const gainNode = audioCtx.createGain();
-        gainNode.gain.value = 20;
-        micState.gainNode = gainNode;
-
-        // Analyser — larger fftSize for better low-freq resolution
-        const analyserNode = audioCtx.createAnalyser();
-        analyserNode.fftSize = 1024;
-        analyserNode.smoothingTimeConstant = 0.3; // faster spike response
-        micState.analyserNode = analyserNode;
-
-        // Connect: source → filter → gain → analyser (NOT to destination)
-        sourceNode.connect(filterNode);
-        filterNode.connect(gainNode);
-        gainNode.connect(analyserNode);
-        // analyserNode intentionally NOT connected to audioCtx.destination (no speaker feedback)
+        src.connect(filter); filter.connect(gain); gain.connect(analyser);
+        // NOT connected to destination — no speaker feedback
 
         micState.measuring = true;
         micSensorVisual.classList.add('measuring');
-        setMicStatus('🎵 Listening for heartbeats…', '');
+        setMicDisplay('--', '🎵 Listening for heartbeats…', '', false);
         micState.loopId = requestAnimationFrame(micLoop);
-
-    } catch (err) {
-        console.error('[Mic]', err);
+    } catch (e) {
         setMicBtn(false);
         micSensorVisual.classList.remove('measuring');
-        if (err.name === 'NotAllowedError') {
-            setMicStatus('❌ Microphone permission denied.', 'err');
-            showToast('Microphone access denied.');
-        } else {
-            setMicStatus('❌ Mic error: ' + err.message, 'err');
-        }
+        if (e.name === 'NotAllowedError') { setMicDisplay('--', '❌ Microphone permission denied.', 'err', false); toast('Mic access denied.'); }
+        else setMicDisplay('--', '❌ ' + e.message, 'err', false);
     }
 }
 
 function stopMic() {
     cancelAnimationFrame(micState.loopId);
-    if (micState.audioCtx) { try { micState.audioCtx.close(); } catch { } }
-    if (micState.stream) { micState.stream.getTracks().forEach(t => t.stop()); }
-    micState.stream = null;
-    micState.audioCtx = null;
-    micState.measuring = false;
+    try { micState.audioCtx?.close(); } catch { }
+    micState.stream?.getTracks().forEach(t => t.stop());
+    micState.stream = null; micState.audioCtx = null; micState.measuring = false;
     micSensorVisual.classList.remove('measuring');
     setMicBtn(false);
-    setMicStatus('Stopped. Press Start to measure again.', '');
-    clearWaveform();
+    setMicDisplay(micBpmValue.textContent, 'Stopped. Press Start to measure again.', '', false);
+    wCtx.clearRect(0, 0, WW, WH);
 }
 
 function micLoop() {
     if (!micState.measuring || !micState.analyserNode) return;
 
-    const bufferLen = micState.analyserNode.frequencyBinCount;
-    const timeDomain = new Float32Array(bufferLen);
-    micState.analyserNode.getFloatTimeDomainData(timeDomain);
+    const n = micState.analyserNode.frequencyBinCount;
+    const td = new Float32Array(n);
+    micState.analyserNode.getFloatTimeDomainData(td);
+    drawWaveform(td);
 
-    // Draw waveform
-    drawWaveform(timeDomain);
-
-    // Compute RMS
-    let sumSquares = 0;
-    for (let i = 0; i < timeDomain.length; i++) sumSquares += timeDomain[i] ** 2;
-    const rms = Math.sqrt(sumSquares / timeDomain.length);
-
+    let ss = 0;
+    for (let i = 0; i < td.length; i++) ss += td[i] ** 2;
+    const rms = Math.sqrt(ss / td.length);
     const now = performance.now();
+
     micState.rmsSamples.push({ rms, t: now });
+    micState.rmsSamples = micState.rmsSamples.filter(s => now - s.t < 3000);
 
-    // Keep ~3s of RMS history
-    const window3s = micState.rmsSamples.filter(s => now - s.t < 3000);
-    micState.rmsSamples = window3s;
-
-    // Dynamic threshold: mean + 1.1 * std (tighter = more sensitive to quiet beats)
     if (micState.rmsSamples.length > 15) {
-        const rmsValues = micState.rmsSamples.map(s => s.rms);
-        const mean = rmsValues.reduce((a, b) => a + b, 0) / rmsValues.length;
-        const std = Math.sqrt(rmsValues.map(v => (v - mean) ** 2).reduce((a, b) => a + b, 0) / rmsValues.length);
-        const threshold = mean + 1.1 * std;  // ← was 1.5, now 1.1 for quiet heartbeats
+        const vals = micState.rmsSamples.map(s => s.rms);
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const std = Math.sqrt(vals.map(v => (v - mean) ** 2).reduce((a, b) => a + b, 0) / vals.length);
+        const thr = mean + 1.1 * std;
 
-        // Detect spike (heartbeat thud)
-        // Floor of 0.0005 (was 0.003) — 20× gain means we still need a real signal,
-        // but quiet chest beats now register
-        if (rms > threshold && rms > 0.0005) {
-            // Refractory period: min 300ms
-            if (now - micState.lastPeakTime > 300) {
-                micState.peakTimes.push(now);
-                micState.lastPeakTime = now;
-            }
+        if (rms > thr && rms > 0.0005 && now - micState.lastPeak > 300) {
+            micState.peaks.push(now);
+            micState.lastPeak = now;
+            if (micState.peaks.length > 12) micState.peaks = micState.peaks.slice(-12);
         }
 
-        // Trim peak history
-        if (micState.peakTimes.length > 12) {
-            micState.peakTimes = micState.peakTimes.slice(-12);
-        }
-
-        updateMicBpm();
+        computeMicBpm();
     }
 
     micState.loopId = requestAnimationFrame(micLoop);
 }
 
-function updateMicBpm() {
-    const pts = micState.peakTimes;
-    if (pts.length < 3) {
-        const needed = 3 - pts.length;
-        setMicStatus(`🎵 Listening… need ${needed} more beat${needed > 1 ? 's' : ''}`, '');
+function computeMicBpm() {
+    const ibi = medianIBI(micState.peaks);
+    if (!ibi) {
+        const needed = Math.max(0, 3 - micState.peaks.length);
+        setMicDisplay('--', `🎵 Listening… need ${needed} more beat${needed !== 1 ? 's' : ''}`, '', false);
+        return;
+    }
+    const bpm = Math.round(60000 / ibi);
+    if (bpm < 40 || bpm > 200) return;
+    setMicDisplay(bpm, `✅ Heartbeat detected — ${classifyZone(bpm)}`, 'ok', true);
+    micState.history.push(bpm);
+    if (micState.history.length > 10) micState.history.shift();
+    renderHistory(micHistoryBars, micState.history, 'teal');
+}
+
+function drawWaveform(td) {
+    wCtx.clearRect(0, 0, WW, WH);
+    wCtx.fillStyle = 'rgba(0,229,204,0.04)';
+    wCtx.fillRect(0, 0, WW, WH);
+    wCtx.lineWidth = 2; wCtx.strokeStyle = 'rgba(0,229,204,0.7)';
+    wCtx.shadowColor = 'rgba(0,229,204,0.45)'; wCtx.shadowBlur = 6;
+    wCtx.beginPath();
+    const sw = WW / td.length;
+    for (let i = 0; i < td.length; i++) {
+        const y = ((td[i] + 1) / 2) * WH;
+        i === 0 ? wCtx.moveTo(0, y) : wCtx.lineTo(i * sw, y);
+    }
+    wCtx.stroke(); wCtx.shadowBlur = 0;
+}
+
+// ═══════════════════════════════════════════════════
+// 3. VIDEO UPLOAD MODE
+// ═══════════════════════════════════════════════════
+const uploadState = { history: [], analysing: false };
+
+// File input triggers
+uploadPickBtn.addEventListener('click', () => videoFileInput.click());
+uploadDropzone.addEventListener('click', e => { if (e.target !== uploadPickBtn) videoFileInput.click(); });
+videoFileInput.addEventListener('change', e => { if (e.target.files[0]) analyseVideo(e.target.files[0]); });
+
+// Drag & drop
+uploadDropzone.addEventListener('dragover', e => { e.preventDefault(); uploadDropzone.classList.add('drag-over'); });
+uploadDropzone.addEventListener('dragleave', () => uploadDropzone.classList.remove('drag-over'));
+uploadDropzone.addEventListener('drop', e => {
+    e.preventDefault(); uploadDropzone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('video/')) analyseVideo(f);
+    else toast('Please drop a video file.');
+});
+
+async function analyseVideo(file) {
+    if (uploadState.analysing) return;
+    uploadState.analysing = true;
+
+    setUploadDisplay('--', `📹 Loading "${file.name}"…`, '', false);
+    uploadProgress.classList.add('active');
+    setProgress(0, 'Loading video…');
+
+    const url = URL.createObjectURL(file);
+    const vid = document.createElement('video');
+    vid.src = url;
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.preload = 'auto';
+
+    await new Promise((res, rej) => {
+        vid.addEventListener('loadedmetadata', res, { once: true });
+        vid.addEventListener('error', rej, { once: true });
+        vid.load();
+    });
+
+    const duration = vid.duration;
+    if (!isFinite(duration) || duration < 5) {
+        toast('⚠️ Video too short — record at least 15 seconds.');
+        endUpload(url); return;
+    }
+
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = 320; offCanvas.height = 240;
+    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+
+    const redBuf = [], tsBuf = [];
+    const peaks = []; let lastPeak = 0;
+    let lastLogTime = -1;
+
+    setProgress(0, 'Analysing frames…');
+
+    vid.addEventListener('ended', () => { finaliseUpload(redBuf, tsBuf, url, duration); });
+    vid.addEventListener('error', () => { toast('❌ Could not read video.'); endUpload(url); });
+
+    // Throttle frame sampling to ~30fps equivalent based on video time
+    const SAMPLE_INTERVAL_MS = 1000 / 30; // target: 30 samples/sec of video time
+
+    function processFrame() {
+        if (vid.paused || vid.ended) return;
+
+        const vt = vid.currentTime;
+        const progress = vt / duration;
+        setProgress(progress, `Analysing… ${Math.round(progress * 100)}%`);
+
+        try {
+            offCtx.drawImage(vid, 0, 0, 320, 240);
+            const SZ = 80;
+            const imageData = offCtx.getImageData(120, 80, SZ, SZ);
+            const data = imageData.data;
+            let rSum = 0;
+            for (let i = 0; i < data.length; i += 4) rSum += data[i];
+            const avgRed = rSum / (SZ * SZ);
+            redBuf.push(avgRed);
+            tsBuf.push(vt * 1000); // convert to ms
+        } catch { }
+
+        requestAnimationFrame(processFrame);
+    }
+
+    try {
+        await vid.play();
+        requestAnimationFrame(processFrame);
+    } catch (e) {
+        toast('❌ Could not play video: ' + e.message);
+        endUpload(url);
+    }
+}
+
+function finaliseUpload(redBuf, tsBuf, url, duration) {
+    setProgress(1, 'Computing BPM…');
+
+    if (redBuf.length < 30) {
+        setUploadDisplay('--', '⚠️ Not enough frames — try a longer video.', 'warn', false);
+        endUpload(url); return;
+    }
+
+    const sm = movingAvg(redBuf, 6);
+    const peaks = [];
+    let lastPeak = 0;
+
+    const n = sm.length;
+    const recent = sm;
+    const mean = recent.reduce((a, b) => a + b, 0) / n;
+    const min = Math.min(...recent);
+    const max = Math.max(...recent);
+    const amp = max - min;
+
+    if (amp < 1.5) {
+        setUploadDisplay('--', '⚠️ Low signal. Was the flash on and finger covering the lens?', 'warn', false);
+        endUpload(url); return;
+    }
+
+    const threshold = mean + amp * 0.3;
+
+    for (let i = 1; i < n - 1; i++) {
+        const prev = sm[i - 1], curr = sm[i], next = sm[i + 1];
+        const t = tsBuf[i];
+        if (curr > threshold && curr >= prev && curr >= next && t - lastPeak > 280) {
+            peaks.push(t);
+            lastPeak = t;
+        }
+    }
+
+    const ibi = medianIBI(peaks);
+    if (!ibi) {
+        setUploadDisplay('--', '⚠️ Could not detect a clear heartbeat. Ensure the video has flash on and finger over lens.', 'warn', false);
+        endUpload(url); return;
+    }
+
+    const bpm = Math.round(60000 / ibi);
+    if (bpm < 35 || bpm > 220) {
+        setUploadDisplay('--', '⚠️ Result out of range — please re-record and try again.', 'warn', false);
+        endUpload(url); return;
+    }
+
+    setUploadDisplay(bpm, `✅ Analysis complete — ${classifyZone(bpm)}`, 'ok', true);
+    uploadState.history.push(bpm);
+    if (uploadState.history.length > 10) uploadState.history.shift();
+    renderHistory(uploadHistoryBars, uploadState.history, 'blue');
+
+    const bp = estimateBP(bpm);
+    uploadSystolic.textContent = bp.sys;
+    uploadDiastolic.textContent = bp.dia;
+
+    endUpload(url);
+}
+
+function setProgress(frac, label) {
+    const pct = Math.round(frac * 100);
+    progressFill.style.width = pct + '%';
+    progressPct.textContent = pct + '%';
+    progressLabel.textContent = label;
+}
+
+function endUpload(url) {
+    URL.revokeObjectURL(url);
+    uploadState.analysing = false;
+    setTimeout(() => uploadProgress.classList.remove('active'), 2000);
+}
+
+// ═══════════════════════════════════════════════════
+// SHARED PEAK DETECTOR (camera live mode)
+// ═══════════════════════════════════════════════════
+function detectPeaks(smoothed, timestamps, peaks, state, mode) {
+    const n = smoothed.length;
+    const recent = smoothed.slice(-60);
+    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const min = Math.min(...recent);
+    const max = Math.max(...recent);
+    const amp = max - min;
+
+    if (amp < 1.5) {
+        setCameraDisplay('--', '🔴 Low signal. Cover lens completely & stay still.', 'warn', false);
         return;
     }
 
-    const ibis = [];
-    for (let i = 1; i < pts.length; i++) ibis.push(pts[i] - pts[i - 1]);
+    const thr = mean + amp * 0.3;
+    const start = n - 60;
 
-    const validIbis = ibis.filter(ibi => ibi >= 300 && ibi <= 1500);
-    if (validIbis.length < 2) return;
+    for (let i = start + 1; i < n - 1; i++) {
+        const curr = smoothed[i], t = timestamps[i];
+        if (curr > thr && curr >= smoothed[i - 1] && curr >= smoothed[i + 1] && t - state.lastPeak > 280) {
+            peaks.push(t);
+            state.lastPeak = t;
+        }
+    }
+    if (peaks.length > 14) peaks.splice(0, peaks.length - 14);
 
-    validIbis.sort((a, b) => a - b);
-    const medianIbi = validIbis[Math.floor(validIbis.length / 2)];
-    const bpm = Math.round(60000 / medianIbi);
-
+    const ibi = medianIBI(peaks);
+    if (!ibi) {
+        const need = Math.max(0, 3 - peaks.length);
+        setCameraDisplay('--', `📡 Detecting… need ${need} more beat${need !== 1 ? 's' : ''}`, '', false);
+        return;
+    }
+    const bpm = Math.round(60000 / ibi);
     if (bpm < 40 || bpm > 200) return;
 
-    setMicBpm(bpm);
-    setMicStatus(`✅ Heartbeat detected — ${classifyBpm(bpm)}`, 'ok');
-
-    micState.bpmHistory.push(bpm);
-    if (micState.bpmHistory.length > 10) micState.bpmHistory.shift();
-    renderHistory(micHistoryBars, micState.bpmHistory, 'teal');
+    setCameraDisplay(bpm, `✅ Good signal — ${classifyZone(bpm)}`, 'ok', true);
+    setGauge(bpm);
+    camState.history = camState.history || [];
+    camState.history.push(bpm);
+    if (camState.history.length > 10) camState.history.shift();
+    renderHistory(cameraHistoryBars, camState.history, 'red');
 }
 
-// ─────────────────────────────────────────────
-// WAVEFORM CANVAS
-// ─────────────────────────────────────────────
-function drawWaveform(timeDomain) {
-    wCtx.clearRect(0, 0, WW, WH);
-    wCtx.fillStyle = 'rgba(0,212,170,0.05)';
-    wCtx.fillRect(0, 0, WW, WH);
-
-    wCtx.lineWidth = 2;
-    wCtx.strokeStyle = 'rgba(0,212,170,0.75)';
-    wCtx.shadowColor = 'rgba(0,212,170,0.5)';
-    wCtx.shadowBlur = 6;
-
-    wCtx.beginPath();
-    const sliceW = WW / timeDomain.length;
-    for (let i = 0; i < timeDomain.length; i++) {
-        const v = (timeDomain[i] + 1) / 2;
-        const x = i * sliceW;
-        const y = v * WH;
-        if (i === 0) wCtx.moveTo(x, y);
-        else wCtx.lineTo(x, y);
+// ═══════════════════════════════════════════════════
+// UI SETTERS
+// ═══════════════════════════════════════════════════
+function setCameraDisplay(bpm, status, statusCls, hasReading) {
+    if (cameraBpmValue.textContent !== String(bpm)) {
+        cameraBpmValue.textContent = bpm;
+        if (bpm !== '--') { cameraBpmValue.classList.remove('pop'); void cameraBpmValue.offsetWidth; cameraBpmValue.classList.add('pop'); }
     }
-    wCtx.stroke();
-    wCtx.shadowBlur = 0;
-}
-
-function clearWaveform() {
-    wCtx.clearRect(0, 0, WW, WH);
-}
-
-// ─────────────────────────────────────────────
-// HISTORY BARS
-// ─────────────────────────────────────────────
-function renderHistory(container, history, modeColor) {
-    if (!history.length) {
-        container.innerHTML = '<p class="history-empty">No readings yet</p>';
-        return;
-    }
-
-    const maxBpm = Math.max(...history, 100);
-    const minBpm = Math.min(...history, 60);
-    const range = maxBpm - minBpm || 40;
-
-    container.innerHTML = '';
-    history.forEach((bpm) => {
-        const heightPct = ((bpm - minBpm) / range) * 70 + 10; // 10%-80% of 60px
-        const heightPx = Math.round((heightPct / 100) * 60);
-
-        const wrap = document.createElement('div');
-        wrap.className = 'bar-wrap';
-
-        const bar = document.createElement('div');
-        bar.className = 'bar';
-        bar.style.height = heightPx + 'px';
-        bar.style.background = modeColor === 'red'
-            ? 'linear-gradient(180deg, rgba(255,58,92,0.8), rgba(255,58,92,0.3))'
-            : 'linear-gradient(180deg, rgba(0,212,170,0.8), rgba(0,212,170,0.3))';
-
-        const label = document.createElement('span');
-        label.textContent = bpm;
-        bar.appendChild(label);
-        wrap.appendChild(bar);
-        container.appendChild(wrap);
-    });
-}
-
-// ─────────────────────────────────────────────
-// BPM CLASSIFICATION
-// ─────────────────────────────────────────────
-function classifyBpm(bpm) {
-    if (bpm < 60) return 'Bradycardia (low)';
-    if (bpm < 80) return 'Resting / Calm';
-    if (bpm < 100) return 'Normal range';
-    if (bpm < 120) return 'Slightly elevated';
-    return 'Elevated / Active';
-}
-
-// ─────────────────────────────────────────────
-// UI HELPERS — CAMERA
-// ─────────────────────────────────────────────
-let lastCameraBpm = null;
-function setCameraBpm(val) {
-    if (val === lastCameraBpm) return;
-    lastCameraBpm = val;
-    cameraBpmValue.textContent = val;
-    cameraBpmCard.classList.toggle('has-reading', val !== '--');
-    if (val !== '--') {
-        cameraBpmValue.classList.remove('pulse-anim');
-        void cameraBpmValue.offsetWidth; // force reflow
-        cameraBpmValue.classList.add('pulse-anim');
+    cameraBpmCard.classList.toggle('has-reading', hasReading);
+    cameraBpmStatus.textContent = status;
+    cameraBpmStatus.className = 'bpm-status' + (statusCls ? ' ' + statusCls : '');
+    if (hasReading && bpm !== '--') {
+        cameraZoneBadge.textContent = classifyZone(+bpm);
+        cameraZoneBadge.classList.add('visible');
+        const bp = estimateBP(+bpm);
+        cameraSystolic.textContent = bp.sys;
+        cameraDiastolic.textContent = bp.dia;
     }
 }
 
-function setCameraStatus(msg, cls = '') {
-    cameraBpmStatus.textContent = msg;
-    cameraBpmStatus.className = 'bpm-status ' + cls;
+function setMicDisplay(bpm, status, statusCls, hasReading) {
+    if (micBpmValue.textContent !== String(bpm)) {
+        micBpmValue.textContent = bpm;
+        if (bpm !== '--') { micBpmValue.classList.remove('pop'); void micBpmValue.offsetWidth; micBpmValue.classList.add('pop'); }
+    }
+    micBpmCard.classList.toggle('has-reading', hasReading);
+    micBpmStatus.textContent = status;
+    micBpmStatus.className = 'bpm-status' + (statusCls ? ' ' + statusCls : '');
+    if (hasReading && bpm !== '--') {
+        micZoneBadge.textContent = classifyZone(+bpm);
+        micZoneBadge.classList.add('visible');
+        const bp = estimateBP(+bpm);
+        micSystolic.textContent = bp.sys;
+        micDiastolic.textContent = bp.dia;
+    }
+}
+
+function setUploadDisplay(bpm, status, statusCls, hasReading) {
+    if (uploadBpmValue.textContent !== String(bpm)) {
+        uploadBpmValue.textContent = bpm;
+        if (bpm !== '--') { uploadBpmValue.classList.remove('pop'); void uploadBpmValue.offsetWidth; uploadBpmValue.classList.add('pop'); }
+    }
+    uploadBpmCard.classList.toggle('has-reading', hasReading);
+    uploadBpmStatus.textContent = status;
+    uploadBpmStatus.className = 'bpm-status' + (statusCls ? ' ' + statusCls : '');
+    if (hasReading && bpm !== '--') {
+        uploadZoneBadge.textContent = classifyZone(+bpm);
+        uploadZoneBadge.classList.add('visible');
+    }
 }
 
 function setCameraBtn(measuring) {
-    cameraState.measuring = measuring;
+    camState.measuring = measuring;
     cameraStartBtn.classList.toggle('measuring', measuring);
     cameraStartBtn.innerHTML = measuring
-        ? '<span class="btn-icon" aria-hidden="true">⏹</span>Stop Measuring'
-        : '<span class="btn-icon" aria-hidden="true">▶</span>Start Measuring';
-}
-
-// ─────────────────────────────────────────────
-// UI HELPERS — MIC
-// ─────────────────────────────────────────────
-let lastMicBpm = null;
-function setMicBpm(val) {
-    if (val === lastMicBpm) return;
-    lastMicBpm = val;
-    micBpmValue.textContent = val;
-    micBpmCard.classList.toggle('has-reading', val !== '--');
-    if (val !== '--') {
-        micBpmValue.classList.remove('pulse-anim');
-        void micBpmValue.offsetWidth;
-        micBpmValue.classList.add('pulse-anim');
-    }
-}
-
-function setMicStatus(msg, cls = '') {
-    micBpmStatus.textContent = msg;
-    micBpmStatus.className = 'bpm-status ' + cls;
+        ? '<span class="btn-icon">⏹</span>Stop Measuring'
+        : '<span class="btn-icon">▶</span>Start Measuring';
 }
 
 function setMicBtn(measuring) {
     micState.measuring = measuring;
     micStartBtn.classList.toggle('measuring', measuring);
     micStartBtn.innerHTML = measuring
-        ? '<span class="btn-icon" aria-hidden="true">⏹</span>Stop Measuring'
-        : '<span class="btn-icon" aria-hidden="true">▶</span>Start Measuring';
+        ? '<span class="btn-icon">⏹</span>Stop Measuring'
+        : '<span class="btn-icon">▶</span>Start Measuring';
 }
 
 // ─────────────────────────────────────────────
-// CLEANUP ON PAGE HIDE (e.g. background tab)
+// CLEANUP ON BACKGROUND
 // ─────────────────────────────────────────────
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
-        if (cameraState.measuring) stopCamera();
+        if (camState.measuring) stopCamera();
         if (micState.measuring) stopMic();
     }
 });
 
-console.log('[BPM Heart] App ready 💓');
+console.log('[BPM Heart] Ready 💓');
