@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BPM Reader</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 50px; background: #121212; color: white; }
+        #bpm-display { font-size: 4em; font-weight: bold; color: #ff5252; margin: 20px 0; }
+        video { display: none; }
+        canvas { display: none; }
+        button { padding: 15px 30px; font-size: 1.2em; border-radius: 8px; border: none; background: #ff5252; color: white; cursor: pointer; font-weight: bold; }
+        .instructions { color: #aaaaaa; max-width: 400px; margin: 0 auto 30px auto; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <h1>Heart Rate</h1>
+    <p class="instructions">Cover the back camera completely with your fingertip. <strong>Turn on your flashlight manually from the Control Center</strong> before starting!</p>
+    <div id="bpm-display">-- BPM</div>
+    <button id="start-btn">Start Reading</button>
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" width="30" height="30"></canvas>
+    <script src="app.js"></script>
+</body>
+</html>
