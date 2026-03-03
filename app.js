@@ -147,17 +147,53 @@ async function startCamera() {
     setCameraStatus('Requesting camera permission…', '');
     setCameraBtn(true);
 
+    // ── Step 1: try getUserMedia WITH torch baked into constraints (best for iOS) ──
+    let stream;
+    let torchGranted = false;
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
             video: {
                 facingMode: { exact: 'environment' },
                 width: { ideal: 320 },
                 height: { ideal: 240 },
                 frameRate: { ideal: 30 },
+                advanced: [{ torch: true }],
             },
             audio: false,
         });
+        torchGranted = true;
+        console.log('[Camera] Torch via getUserMedia constraint ✔');
+    } catch (firstErr) {
+        // Torch-in-constraint failed (common on iOS) — retry without it
+        console.warn('[Camera] getUserMedia+torch failed:', firstErr.message, '— retrying without torch constraint');
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: { exact: 'environment' },
+                    width: { ideal: 320 },
+                    height: { ideal: 240 },
+                    frameRate: { ideal: 30 },
+                },
+                audio: false,
+            });
+        } catch (secondErr) {
+            console.error('[Camera]', secondErr);
+            setCameraBtn(false);
+            cameraSensorVisual.classList.remove('measuring');
+            if (secondErr.name === 'NotAllowedError') {
+                setCameraStatus('❌ Camera permission denied. Enable it in settings.', 'err');
+                showToast('Camera access denied.');
+            } else if (secondErr.name === 'OverconstrainedError') {
+                showToast('Rear camera not found – trying any camera…');
+                retryCameraAnyFacing();
+            } else {
+                setCameraStatus('❌ Camera error: ' + secondErr.message, 'err');
+            }
+            return;
+        }
+    }
 
+    try {
         cameraState.stream = stream;
         cameraVideo.srcObject = stream;
         await cameraVideo.play();
@@ -165,37 +201,38 @@ async function startCamera() {
         cameraCanvas.width = cameraVideo.videoWidth || 320;
         cameraCanvas.height = cameraVideo.videoHeight || 240;
 
-        // Enable torch (flashlight)
-        const [track] = stream.getVideoTracks();
-        if (track && 'applyConstraints' in track) {
-            const caps = track.getCapabilities();
-            if (caps && caps.torch) {
-                await track.applyConstraints({ advanced: [{ torch: true }] });
-                console.log('[Camera] Torch enabled ✔');
-            } else {
-                showToast('⚠️ Torch not supported on this device. Keep finger pressed firmly.');
+        // ── Step 2: try applyConstraints as Android fallback (if step 1 didn't grant torch) ──
+        if (!torchGranted) {
+            const [track] = stream.getVideoTracks();
+            if (track && 'applyConstraints' in track) {
+                try {
+                    const caps = track.getCapabilities ? track.getCapabilities() : {};
+                    if (caps && caps.torch) {
+                        await track.applyConstraints({ advanced: [{ torch: true }] });
+                        torchGranted = true;
+                        console.log('[Camera] Torch via applyConstraints ✔');
+                    }
+                } catch (e) {
+                    console.warn('[Camera] applyConstraints torch failed:', e.message);
+                }
+            }
+            if (!torchGranted) {
+                // iOS Safari / devices where torch is not web-accessible
+                showToast('💡 Flash not available in browser. Turn on your torch app manually, then measure.');
+                setCameraStatus('📡 Detecting pulse… (manual torch needed)', 'warn');
             }
         }
 
         cameraState.measuring = true;
         cameraSensorVisual.classList.add('measuring');
-        setCameraStatus('📡 Detecting pulse… keep finger still', '');
+        if (torchGranted) setCameraStatus('📡 Detecting pulse… keep finger still', '');
         cameraState.loopId = requestAnimationFrame(cameraLoop);
 
     } catch (err) {
-        console.error('[Camera]', err);
+        console.error('[Camera] Setup error:', err);
         setCameraBtn(false);
         cameraSensorVisual.classList.remove('measuring');
-        if (err.name === 'NotAllowedError') {
-            setCameraStatus('❌ Camera permission denied. Enable it in settings.', 'err');
-            showToast('Camera access denied.');
-        } else if (err.name === 'OverconstrainedError') {
-            // Retry without exact facingMode
-            showToast('Rear camera not found – trying any camera…');
-            retryCameraAnyFacing();
-        } else {
-            setCameraStatus('❌ Camera error: ' + err.message, 'err');
-        }
+        setCameraStatus('❌ Camera error: ' + err.message, 'err');
     }
 }
 
@@ -437,7 +474,7 @@ async function startMic() {
         micState.stream = stream;
 
         // Build Web Audio graph:
-        // MediaStreamSource → BiquadFilter (lowpass 100Hz) → Analyser → destination(muted)
+        // MediaStreamSource → BiquadFilter (lowpass 50Hz) → Gain (20×) → Analyser
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         const audioCtx = new AudioContext();
         micState.audioCtx = audioCtx;
@@ -445,22 +482,29 @@ async function startMic() {
         const sourceNode = audioCtx.createMediaStreamSource(stream);
         micState.sourceNode = sourceNode;
 
-        // Lowpass filter: cuts everything above 100Hz, keeping only the heartbeat thud
+        // Lowpass at 50Hz — heartbeat thuds live in the 20–50Hz band.
+        // This aggressively kills breathing, talking, and ambient noise.
         const filterNode = audioCtx.createBiquadFilter();
         filterNode.type = 'lowpass';
-        filterNode.frequency.value = 100;
-        filterNode.Q.value = 0.7;
+        filterNode.frequency.value = 50;  // ← was 100Hz
+        filterNode.Q.value = 0.5;         // gentle roll-off
         micState.filterNode = filterNode;
 
-        // Analyser
+        // Gain: amplify the very-quiet filtered heartbeat signal 20×
+        const gainNode = audioCtx.createGain();
+        gainNode.gain.value = 20;
+        micState.gainNode = gainNode;
+
+        // Analyser — larger fftSize for better low-freq resolution
         const analyserNode = audioCtx.createAnalyser();
-        analyserNode.fftSize = 512;
-        analyserNode.smoothingTimeConstant = 0.4;
+        analyserNode.fftSize = 1024;
+        analyserNode.smoothingTimeConstant = 0.3; // faster spike response
         micState.analyserNode = analyserNode;
 
-        // Connect: source → filter → analyser (not connected to output = silent)
+        // Connect: source → filter → gain → analyser (NOT to destination)
         sourceNode.connect(filterNode);
-        filterNode.connect(analyserNode);
+        filterNode.connect(gainNode);
+        gainNode.connect(analyserNode);
         // analyserNode intentionally NOT connected to audioCtx.destination (no speaker feedback)
 
         micState.measuring = true;
@@ -516,15 +560,17 @@ function micLoop() {
     const window3s = micState.rmsSamples.filter(s => now - s.t < 3000);
     micState.rmsSamples = window3s;
 
-    // Dynamic threshold: mean + 1.5 * std of recent RMS
+    // Dynamic threshold: mean + 1.1 * std (tighter = more sensitive to quiet beats)
     if (micState.rmsSamples.length > 15) {
         const rmsValues = micState.rmsSamples.map(s => s.rms);
         const mean = rmsValues.reduce((a, b) => a + b, 0) / rmsValues.length;
         const std = Math.sqrt(rmsValues.map(v => (v - mean) ** 2).reduce((a, b) => a + b, 0) / rmsValues.length);
-        const threshold = mean + 1.5 * std;
+        const threshold = mean + 1.1 * std;  // ← was 1.5, now 1.1 for quiet heartbeats
 
         // Detect spike (heartbeat thud)
-        if (rms > threshold && rms > 0.003) {
+        // Floor of 0.0005 (was 0.003) — 20× gain means we still need a real signal,
+        // but quiet chest beats now register
+        if (rms > threshold && rms > 0.0005) {
             // Refractory period: min 300ms
             if (now - micState.lastPeakTime > 300) {
                 micState.peakTimes.push(now);
